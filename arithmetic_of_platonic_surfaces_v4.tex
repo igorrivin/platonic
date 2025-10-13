@@ -1,0 +1,56 @@
+
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amsthm,amssymb,amsfonts,mathtools}
+\usepackage{enumitem}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=teal,urlcolor=blue]{hyperref}
+\geometry{margin=1in}
+\title{\textbf{Arithmetic of Platonic Surfaces}\\[2pt]\large Algorithms, Fields, and a Planar-Points Pipeline}
+\author{}
+\date{}
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+\newcommand{\Hh}{\mathbb{H}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\Q}{\mathbb{Q}}
+\newcommand{\PSL}{\mathrm{PSL}}
+\newcommand{\tr}{\mathrm{tr}}
+\begin{document}
+\maketitle
+\begin{abstract}
+We revisit arithmeticity for surface groups arising from ideal polyhedra, record a computation-friendly Penner--Rivin algorithm, explain how to compute the invariant trace field from shears, and add a practical pipeline that starts from a planar point set and ends with a uniformizing Fuchsian group. A worked ``off-center hexagon'' example closes the loop (shears, field, volume).
+\end{abstract}
+\section{Trace fields and arithmeticity}
+For a finitely generated Fuchsian group $\Gamma<\PSL_2(\mathbb{R})$ and a lift $\widetilde\Gamma<\mathrm{SL}_2(\mathbb{R})$, the \emph{invariant trace field} is
+\begin{equation*}
+k(\Gamma)=\Q\big(\{\tr(\tilde g^2):\tilde g\in\widetilde\Gamma\}\big).
+\end{equation*}
+It is independent of the lift and stable under commensurability. In the \emph{cusped} case, arithmetic $\iff k(\Gamma)=\Q$ (so $\Gamma$ is commensurable with $\PSL_2(\Z)$). From an ideal triangulation with shear coordinates $Z_e$, the Penner--Rivin product expresses $\tr(g)$ as a Laurent polynomial in $e^{Z_e/2}$, so $k(\Gamma)\subseteq \Q(e^{Z_e/2})$.
+\section{Planar points $\to$ convex hull $\to$ group}
+Given $P=\{z_i\}\subset\C$:
+\begin{enumerate}[leftmargin=2em]
+\item \textbf{Back-project} to $S^2$ by inverse stereographic projection; take the Euclidean \textbf{convex hull}.
+\item \textbf{Triangulate faces} by a fan; each oriented edge $x\to y$ with adjacent vertices $a$ (left) and $b$ (right) carries the \emph{complex shear--bend}
+\begin{equation*}
+\tau_{xy}=\log\!\frac{(a-x)(b-y)}{(a-y)(b-x)}.
+\end{equation*}
+Its real part is the Penner shear; the imaginary part is the exterior dihedral (zero for face diagonals).
+\item Feeding the shears $Z_e=\Re\tau_e$ into the Penner--Rivin algorithm gives a generating set of matrices for the holonomy $\Gamma<\PSL_2(\mathbb{R})$.
+\end{enumerate}
+\section{Worked example: the off-center hexagon}
+Let $\omega=e^{\pi i/3}$ and $z_i=1+\omega^i$ ($i=0,\dots,5$). Add the north pole to obtain a hexagonal pyramid. With a base fan triangulation, lateral edge shears vanish while equatorial shears take two nonzero values (up to sign), yielding a nonarithmetic group with
+\begin{equation*}
+k(\Gamma)=\Q(\sqrt{3}).
+\end{equation*}
+The volume is the sum of four Bloch--Wigner values for the shapes $(z_0-z_{k+1})/(z_k-z_{k+1})$, $k=1,2,3,4$.
+\paragraph{Code.} The repository provides a python module that implements this pipeline end-to-end (convex hull, shears, holonomy, field signature, volume, mesh, and a PNG renderer with lights and soap-film iridescence).
+\end{document}
