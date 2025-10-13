@@ -22,6 +22,9 @@ from typing import List, Tuple, Dict, Any, Optional
 import numpy as np
 import math, cmath
 
+# Sentinel for infinity
+INF = None
+
 # Optional deps
 try:
     from scipy.spatial import ConvexHull
@@ -41,16 +44,20 @@ from rivin_holonomy import Triangulation, generators_from_triangulation
 # ---------- Stereographic and cross ratios ----------
 
 def stereographic_inverse(z: complex) -> np.ndarray:
+    if z is None or z is INF:
+        return np.array([0.0, 0.0, 1.0], dtype=float)
     x, y = z.real, z.imag
     d = x*x + y*y + 1.0
     return np.array([2*x/d, 2*y/d, (x*x + y*y - 1.0)/d], dtype=float)
 
 def stereographic(p: np.ndarray) -> complex:
     x, y, z = float(p[0]), float(p[1]), float(p[2])
+    # North pole maps to infinity (None)
+    if abs(z - 1.0) < 1e-14:
+        return None
     denom = 1.0 - z
     if abs(denom) < 1e-15:
-        R = 1e15
-        return complex(R*x, R*y)
+        return None
     return complex(x/denom, y/denom)
 
 def cross_ratio(z1: complex, z2: complex, z3: complex, z4: complex) -> complex:
@@ -245,7 +252,8 @@ def bloch_wigner(z: complex) -> float:
     return float(mp.im(mp.polylog(2, z)) + mp.arg(1 - z)*mp.log(abs(z)))
 
 def tetra_shape(z0, z1, z2, z3) -> complex:
-    CR = cross_ratio(z0, z1, z2, z3)
+    # Use INF-safe cross ratio if available
+    CR = cr_axby(z0, z1, z2, z3)
     if abs(CR.imag) < 1e-15 and CR.real < 0: CR += 1e-15j
     return CR
 
@@ -262,11 +270,28 @@ def volume_from_hull(pts3: np.ndarray, faces: List[List[int]], apex: Optional[in
     return total
 
 def volume_from_pointset(points: List[complex], apex_index: Optional[int]=None, add_north_pole: bool=False) -> float:
+    """Compute volume using all hull simplices directly."""
+    from scipy.spatial import ConvexHull
     pts3 = np.vstack([stereographic_inverse(z) for z in points])
     if add_north_pole:
         pts3 = np.vstack([pts3, np.array([[0.0,0.0,1.0]])])
-    hull = convex_hull_from_points_on_sphere(pts3)
-    return volume_from_hull(pts3, hull["faces"], apex=apex_index)
+    hull = ConvexHull(pts3)
+    
+    # Use all simplices
+    z = [stereographic(p) for p in pts3]
+    if apex_index is None:
+        apex_index = 0
+    
+    total = 0.0
+    for tri in hull.simplices:
+        a, b, c = tri
+        if apex_index in (a, b, c):
+            continue
+        shape = tetra_shape(z[apex_index], z[a], z[b], z[c])
+        vol = abs(bloch_wigner(shape))
+        total += vol
+    
+    return total
 
 # ---------- Meshing & model conversion ----------
 
@@ -318,6 +343,166 @@ def hull_to_mesh(points: List[complex], add_north_pole=False, refinement=0, mode
         pts3=np.vstack([pts3, np.array([[0.0,0.0,1.0]])])
     hull=convex_hull_from_points_on_sphere(pts3)
     return triangulated_mesh_from_hull(pts3, hull["faces"], refinement=refinement, model=model, as_trimesh=as_trimesh)
+
+# ---------- Volume gradients ----------
+
+def _log_two_sin_angle_from_complex(w, eps=1e-15):
+    """
+    For w != real, log|2 sin Arg(w)| = log( 2 |Im w| / |w| ).
+    Branch-free (uses only real logs). 'eps' protects degeneracies.
+    """
+    if w is INF:
+        # Should not occur for shape factors in valid configurations
+        return 0.0
+    return math.log(2.0 * max(abs(w.imag), eps) / max(abs(w), eps))
+
+def _G_of_shape(z):
+    """
+    dVol = Im( G(z) * dz ), where
+      G(z) = (-sα + sβ)/z  -  sβ/(z-1)  +  sγ/(1-z),
+    with s• = log|2 sin(angle•)| evaluated branch-free via Im/|.|.
+    """
+    # the three angles' log-sine factors
+    s_alpha  = _log_two_sin_angle_from_complex(z)
+    s_beta   = _log_two_sin_angle_from_complex(1.0 - 1.0/z if z != 0 else 1.0+0.0j)
+    s_gamma  = _log_two_sin_angle_from_complex(1.0 - z)
+
+    def inv(u):
+        if u is INF:                # 1/∞ -> 0
+            return 0.0 + 0.0j
+        if isinstance(u, complex):
+            if abs(u) < 1e-15:      # safe reciprocal
+                return u.conjugate() / (abs(u)**2 + 1e-30)
+            return 1.0/u
+        return 1.0/complex(u)
+
+    return (-s_alpha + s_beta) * inv(z) - s_beta * inv(z - 1.0) + s_gamma * inv(1.0 - z)
+
+def _dlog_cr_coeffs(a, x, b, y):
+    """
+    Coefficients (S_a, S_x, S_b, S_y) such that d log z = S_a da + S_x dx + S_b db + S_y dy,
+    for z = CR(a,x; b,y), with INF handled.
+    """
+    def inv_diff(u, v):
+        if u is INF or v is INF:
+            return 0.0 + 0.0j       # 1/(∞ - finite) = 0
+        d = (u - v)
+        if abs(d) < 1e-15:
+            return d.conjugate() / (abs(d)**2 + 1e-30)
+        return 1.0 / d
+
+    # Reduced forms for INF cases
+    if a is INF and b is INF:
+        return 0j, 0j, 0j, 0j
+    if a is INF:
+        # z = (b - y)/(b - x)
+        Sa = 0j
+        Sb = inv_diff(b, y) - inv_diff(b, x)
+        Sx = +inv_diff(b, x)
+        Sy = -inv_diff(b, y)
+        return Sa, Sx, Sb, Sy
+    if b is INF:
+        # z = (a - x)/(a - y)
+        Sb = 0j
+        Sa = inv_diff(a, x) - inv_diff(a, y)
+        Sx = -inv_diff(a, x)
+        Sy = +inv_diff(a, y)
+        return Sa, Sx, Sb, Sy
+    if x is INF:
+        # z = (b - y)/(a - y)
+        Sx = 0j
+        Sb = inv_diff(b, y)
+        Sa = -inv_diff(a, y)
+        Sy = -inv_diff(b, y) + inv_diff(a, y)
+        return Sa, Sx, Sb, Sy
+    if y is INF:
+        # z = (a - x)/(b - x)
+        Sy = 0j
+        Sa = inv_diff(a, x)
+        Sb = -inv_diff(b, x)
+        Sx = -inv_diff(a, x) + inv_diff(b, x)
+        return Sa, Sx, Sb, Sy
+
+    # General finite case
+    Sa = inv_diff(a, x) - inv_diff(a, y)
+    Sx = -inv_diff(a, x) + inv_diff(b, x)
+    Sb = inv_diff(b, y) - inv_diff(b, x)
+    Sy = -inv_diff(b, y) + inv_diff(a, y)
+    return Sa, Sx, Sb, Sy
+
+def volume_and_gradient_from_hull(pts3, faces, apex=None, variable_mask=None):
+    """
+    Volume and analytic gradient wrt planar coords of vertices.
+    pts3: (N,3) on S^2; faces: polygon cycles (convex hull); apex: pulling vertex index.
+    Returns (V, grad) where grad[i] = (∂V/∂x_i, ∂V/∂y_i).
+    """
+    # Note: We should use the hull simplices directly, not faces
+    # This is a compatibility function - prefer volume_and_gradient_from_hull_simplices
+    from scipy.spatial import ConvexHull
+    hull = ConvexHull(pts3)
+    return volume_and_gradient_from_hull_simplices(pts3, hull, apex, variable_mask)
+
+def volume_and_gradient_from_hull_simplices(pts3, hull, apex=None, variable_mask=None):
+    """
+    Volume and analytic gradient using hull simplices directly.
+    """
+    zC = [stereographic(p) for p in pts3]          # complex chart; may be INF
+    N  = len(zC)
+    if apex is None:
+        apex = 0
+    tris = hull.simplices  # Use all simplices directly
+
+    V = 0.0
+    grad = np.zeros((N, 2), dtype=float)
+
+    for (a_idx, b_idx, c_idx) in tris:
+        if apex in (a_idx, b_idx, c_idx):
+            continue
+        z0, z1, z2, z3 = zC[apex], zC[a_idx], zC[b_idx], zC[c_idx]
+
+        # shape for tetra (z0,z1,z2,z3) using CR(z2,z0; z3,z1)
+        z = cr_axby(z2, z0, z3, z1)
+
+        # volume via Bloch–Wigner (value only; gradient doesn't need Li2)
+        V += abs(bloch_wigner(z))
+
+        # dVol = Im( G(z)*dz ), dz = z * d log z, d log z = S_a da + S_x dx + S_b db + S_y dy
+        G  = _G_of_shape(z)
+        Sa, Sx, Sb, Sy = _dlog_cr_coeffs(z2, z0, z3, z1)
+
+        W_a = G * z * Sa
+        W_x = G * z * Sx
+        W_b = G * z * Sb
+        W_y = G * z * Sy
+
+        # Pack: Im(W)*dx + Re(W)*dy for each vertex
+        if variable_mask is None or variable_mask[b_idx]:
+            grad[b_idx, 0] += W_a.imag
+            grad[b_idx, 1] += W_a.real
+        if variable_mask is None or variable_mask[apex]:
+            grad[apex, 0]  += W_x.imag
+            grad[apex, 1]  += W_x.real
+        if variable_mask is None or variable_mask[c_idx]:
+            grad[c_idx, 0] += W_b.imag
+            grad[c_idx, 1] += W_b.real
+        if variable_mask is None or variable_mask[a_idx]:
+            grad[a_idx, 0] += W_y.imag
+            grad[a_idx, 1] += W_y.real
+
+    return V, grad
+
+def volume_and_gradient_from_pointset(points, apex_index=None, add_north_pole=False, variable_mask=None):
+    """
+    Wrapper: planar points -> hull -> volume and gradient.
+    """
+    from scipy.spatial import ConvexHull
+    pts3 = np.vstack([stereographic_inverse(z) for z in points])
+    if add_north_pole:
+        pts3 = np.vstack([pts3, np.array([[0.0, 0.0, 1.0]])])
+        if variable_mask is not None:
+            variable_mask = variable_mask + [False]  # North pole is fixed
+    hull = ConvexHull(pts3)
+    return volume_and_gradient_from_hull_simplices(pts3, hull, apex=apex_index, variable_mask=variable_mask)
 
 # ---------- Renderer with style knobs ----------
 
